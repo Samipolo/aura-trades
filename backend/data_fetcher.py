@@ -9,7 +9,7 @@ import numpy as np
 from datetime import datetime, timedelta
 import time as _time
 import pytz
-from config import ALL_INSTRUMENTS, DATA_CONFIG, INSTRUMENT_NAMES
+from config import ALL_INSTRUMENTS, DATA_CONFIG, INSTRUMENT_NAMES, CLOUD_MODE
 
 _YAHOO_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
@@ -35,7 +35,7 @@ def _yahoo_chart(symbol: str, interval: str = "15m", range_str: str = "60d") -> 
     url = f"https://query2.finance.yahoo.com/v8/finance/chart/{symbol}"
     params = {"interval": interval, "range": range_str, "includePrePost": "false"}
     try:
-        r = _requests.get(url, params=params, headers=_YAHOO_HEADERS, timeout=30)
+        r = _requests.get(url, params=params, headers=_YAHOO_HEADERS, timeout=15)
         if r.status_code != 200:
             return pd.DataFrame()
         data = r.json()
@@ -79,7 +79,8 @@ class DataFetcher:
             return self.cache[cache_key]
 
         try:
-            df = _yahoo_chart(symbol, interval="15m", range_str="60d")
+            range_str = "30d" if CLOUD_MODE else "60d"
+            df = _yahoo_chart(symbol, interval="15m", range_str=range_str)
             if df.empty:
                 return pd.DataFrame()
             self.cache[cache_key] = df

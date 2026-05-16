@@ -49,11 +49,8 @@ ALL_INSTRUMENTS = FOREX_PAIRS + INDICES + COMMODITIES + CRYPTO
 import os as _os
 CLOUD_MODE = _os.environ.get("RENDER", "") != "" or _os.environ.get("CLOUD_MODE", "") == "1"
 CLOUD_INSTRUMENTS = [
-    "EURUSD=X", "GBPUSD=X", "USDJPY=X", "AUDUSD=X", "USDCAD=X",
-    "GBPJPY=X", "EURGBP=X",
-    "^GSPC", "^IXIC", "^GDAXI",
-    "GC=F", "CL=F",
-    "BTC-USD", "ETH-USD",
+    "EURUSD=X", "GBPUSD=X", "USDJPY=X",
+    "GC=F", "BTC-USD", "^GSPC",
 ]
 ACTIVE_INSTRUMENTS = CLOUD_INSTRUMENTS if CLOUD_MODE else ALL_INSTRUMENTS
 

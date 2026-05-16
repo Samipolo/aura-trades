@@ -315,8 +315,9 @@ def _run_full_analysis():
         macro_context = macro_engine.analyze("DX-Y.NYB", all_data)
 
     # ===== STEP 4: PARALLEL INSTRUMENT ANALYSIS =====
-    print(f"[AURA V2] Analyzing {len(all_data)} instruments in parallel...")
-    with ThreadPoolExecutor(max_workers=6) as pool:
+    _per_instrument_timeout = 30 if CLOUD_MODE else 120
+    print(f"[AURA V2] Analyzing {len(all_data)} instruments in parallel (timeout={_per_instrument_timeout}s)...")
+    with ThreadPoolExecutor(max_workers=4) as pool:
         analysis_futures = {}
         for symbol, df_15m in all_data.items():
             df_1h = all_1h.get(symbol)
@@ -324,12 +325,16 @@ def _run_full_analysis():
             f = pool.submit(_analyze_one_instrument, symbol, df_15m, df_1h, df_4h, all_data, correlation_data)
             analysis_futures[f] = symbol
 
-        for future in as_completed(analysis_futures):
-            signal, err = future.result()
-            if err:
-                errors.append(err)
-            elif signal:
-                all_signals.append(signal)
+        for future in as_completed(analysis_futures, timeout=_per_instrument_timeout * len(all_data)):
+            try:
+                signal, err = future.result(timeout=_per_instrument_timeout)
+                if err:
+                    errors.append(err)
+                elif signal:
+                    all_signals.append(signal)
+            except Exception as e:
+                sym = analysis_futures.get(future, "?")
+                errors.append(f"Timeout/Error: {sym}: {str(e)[:50]}")
 
     # ===== STEP 5: RANK =====
     print(f"[AURA V2] Ranking {len(all_signals)} signals...")
