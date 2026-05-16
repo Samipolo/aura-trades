@@ -39,7 +39,7 @@ from fundamental_engine import FundamentalEngine
 from institutional_engine import InstitutionalFlowEngine
 from regime_engine import RegimeDetectionEngine
 from macro_engine import MacroIntermarketEngine
-from config import ALL_INSTRUMENTS, INSTRUMENT_NAMES, ASSET_CLASSES
+from config import ALL_INSTRUMENTS, ACTIVE_INSTRUMENTS, INSTRUMENT_NAMES, ASSET_CLASSES, CLOUD_MODE
 
 # TradingView MCP Bridge — direct Python integration (no MCP overhead)
 try:
@@ -167,7 +167,7 @@ def _run_full_analysis():
     all_1h = {}    # 1h data
     all_4h = {}    # 4h data
     with ThreadPoolExecutor(max_workers=8) as pool:
-        futures = {pool.submit(_fetch_one, sym): sym for sym in ALL_INSTRUMENTS}
+        futures = {pool.submit(_fetch_one, sym): sym for sym in ACTIVE_INSTRUMENTS}
         for future in as_completed(futures):
             sym, df_15m, df_1h, df_4h, err = future.result()
             if err:
@@ -336,29 +336,68 @@ def _run_full_analysis():
 # ── Analysis lock + cache: prevent stacking requests ──
 _analysis_lock = threading.Lock()
 _analysis_cache = {"result": None, "timestamp": 0}
-_CACHE_TTL = 120  # seconds – serve cached result for 2 min
+_CACHE_TTL = 300  # seconds – serve cached result for 5 min
+_BG_REFRESH_INTERVAL = 300  # auto-refresh every 5 min
+
+
+def _background_analysis_worker():
+    """Run analysis in background thread on a timer."""
+    print("[AURA V2] Background worker: starting first analysis...")
+    while True:
+        try:
+            if _analysis_lock.acquire(blocking=False):
+                try:
+                    result = _run_full_analysis()
+                    if result and result.get("success"):
+                        _analysis_cache["result"] = result
+                        _analysis_cache["timestamp"] = _time.time()
+                        print(f"[AURA V2] Background refresh complete: {result.get('signals_generated', 0)} signals")
+                    else:
+                        print(f"[AURA V2] Background refresh failed: {result}")
+                finally:
+                    _analysis_lock.release()
+            else:
+                print("[AURA V2] Background worker: analysis already running, skipping.")
+        except Exception as e:
+            print(f"[AURA V2] Background worker error: {e}")
+            if _analysis_lock.locked():
+                try:
+                    _analysis_lock.release()
+                except RuntimeError:
+                    pass
+        _time.sleep(_BG_REFRESH_INTERVAL)
+
+
+# Start background analysis thread on import (runs first analysis immediately)
+_bg_thread = threading.Thread(target=_background_analysis_worker, daemon=True)
+_bg_thread.start()
 
 
 @app.get("/api/analyze")
 async def analyze_all():
     """
     MAIN ENDPOINT: Full multi-engine analysis of all CFD pairs.
-    Only one analysis runs at a time; others get cached / busy.
+    Returns cached results instantly. Background worker keeps data fresh.
     """
-    # Serve cached result if still fresh
-    age = _time.time() - _analysis_cache["timestamp"]
-    if _analysis_cache["result"] and age < _CACHE_TTL:
-        return JSONResponse(content=_analysis_cache["result"])
+    # Always serve cached result if available
+    if _analysis_cache["result"]:
+        result = _analysis_cache["result"]
+        age = _time.time() - _analysis_cache["timestamp"]
+        result["cache_age_seconds"] = round(age, 1)
+        return JSONResponse(content=result)
 
-    # If another analysis is already running, return cached or busy
-    if not _analysis_lock.acquire(blocking=False):
-        if _analysis_cache["result"]:
-            return JSONResponse(content=_analysis_cache["result"])
+    # No cache yet — first analysis still running
+    if _analysis_lock.locked():
         return JSONResponse(
             status_code=202,
-            content={"success": False, "detail": "Analysis already in progress, please wait..."},
+            content={
+                "success": False,
+                "detail": "First analysis is running, please wait ~60 seconds...",
+                "loading": True,
+            },
         )
 
+    # Edge case: no cache and not running — trigger one
     try:
         result = await asyncio.to_thread(_run_full_analysis)
         if not result.get("success"):
@@ -371,8 +410,6 @@ async def analyze_all():
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
-    finally:
-        _analysis_lock.release()
 
 
 def _run_single_analysis(symbol):

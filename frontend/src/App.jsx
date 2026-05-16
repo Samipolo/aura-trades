@@ -31,23 +31,30 @@ function App() {
   }
 
   const fetchAnalysis = useCallback(async () => {
-    setLoading(true)
+    if (!data) setLoading(true)
     setError(null)
     try {
-      const response = await axios.get(`${API_BASE}/analyze`, { timeout: 600000 })
+      const response = await axios.get(`${API_BASE}/analyze`, { timeout: 120000 })
+      if (response.data?.loading) {
+        setError('Server is warming up — first analysis running (~60s)...')
+        setTimeout(() => fetchAnalysis(), 5000)
+        return
+      }
       if (response.data?.success === false) {
-        setError(response.data.detail || 'Analysis in progress, retrying...')
-        setTimeout(() => fetchAnalysis(), 15000)
+        setError(response.data.detail || 'Analysis in progress...')
+        setTimeout(() => fetchAnalysis(), 5000)
         return
       }
       setData(response.data)
       setLastUpdate(new Date())
-    } catch (err) {
-      setError(err.response?.data?.detail || err.message || 'Failed to fetch analysis')
-    } finally {
       setLoading(false)
+    } catch (err) {
+      if (!data) setError(err.response?.data?.detail || err.message || 'Connecting to server...')
+      setTimeout(() => fetchAnalysis(), 5000)
+    } finally {
+      if (data) setLoading(false)
     }
-  }, [])
+  }, [data])
 
   useEffect(() => {
     fetchAnalysis()

@@ -443,7 +443,8 @@ export default function TradingChart({ signals, selectedSignal, onBack, onSelect
                 )}
               </div>
             </div>
-            {/* ─── MT5 ONE-CLICK TRADE BUTTON ─── */}
+            {/* ─── MT5 ONE-CLICK TRADE BUTTON (local only) ─── */}
+            {window.location.hostname === 'localhost' && (
             <div className="mt-3">
               <button 
                 onClick={async () => {
@@ -479,6 +480,7 @@ export default function TradingChart({ signals, selectedSignal, onBack, onSelect
                 TAKE ON MT5 (1 LOT)
               </button>
             </div>
+            )}
           </div>
         )}
 

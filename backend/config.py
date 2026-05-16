@@ -45,6 +45,18 @@ CRYPTO = [
 # All instruments combined
 ALL_INSTRUMENTS = FOREX_PAIRS + INDICES + COMMODITIES + CRYPTO
 
+# Cloud-optimized subset (top 15 most liquid — faster for web deployment)
+import os as _os
+CLOUD_MODE = _os.environ.get("RENDER", "") != "" or _os.environ.get("CLOUD_MODE", "") == "1"
+CLOUD_INSTRUMENTS = [
+    "EURUSD=X", "GBPUSD=X", "USDJPY=X", "AUDUSD=X", "USDCAD=X",
+    "GBPJPY=X", "EURGBP=X",
+    "^GSPC", "^IXIC", "^GDAXI",
+    "GC=F", "CL=F",
+    "BTC-USD", "ETH-USD",
+]
+ACTIVE_INSTRUMENTS = CLOUD_INSTRUMENTS if CLOUD_MODE else ALL_INSTRUMENTS
+
 # Display names mapping
 INSTRUMENT_NAMES = {
     "EURUSD=X": "EUR/USD", "GBPUSD=X": "GBP/USD", "USDJPY=X": "USD/JPY",
