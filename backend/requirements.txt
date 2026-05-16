@@ -1,0 +1,15 @@
+fastapi
+uvicorn[standard]
+gunicorn
+yfinance
+pandas
+numpy
+scipy
+requests
+python-dateutil
+pytz
+aiohttp
+pydantic
+python-dotenv
+feedparser
+tradingview-ta
