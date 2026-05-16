@@ -139,6 +139,10 @@ def _fetch_one(symbol):
         if df_15m.empty or len(df_15m) < 200:
             return symbol, None, None, None, None
 
+        # Cloud mode: skip 1H/4H fetches entirely for speed
+        if CLOUD_MODE:
+            return symbol, df_15m, None, None, None
+
         df_1h = data_fetcher.fetch_1h_data(symbol)
         df_4h = None
         # Build 4h from 1h if available
@@ -156,18 +160,135 @@ def _fetch_one(symbol):
         return symbol, None, None, None, f"Fetch: {symbol}: {str(e)[:50]}"
 
 
+def _analyze_one_instrument(symbol, df_15m, df_1h, df_4h, all_data, correlation_data):
+    """Analyze a single instrument — called in parallel from thread pool."""
+    try:
+        indicator_data = indicator_engine.calculate_all(df_15m)
+        if not indicator_data:
+            return None, None
+
+        structure_data = structure_analyzer.analyze(df_15m)
+        if not structure_data:
+            return None, None
+
+        quant_data = quant_engine.analyze(df_15m)
+        orderflow_data = orderflow_engine.analyze(df_15m)
+        mtf_data = mtf_engine.analyze(df_15m)
+        pattern_data = pattern_engine.analyze(df_15m)
+
+        # Skip heavy engines in cloud mode for speed
+        if CLOUD_MODE:
+            ict_data = {"bias": "neutral", "ict_score": 0, "kill_zone": {}, "power_of_3": {}}
+            amt_data = {"bias": "neutral", "amt_score": 0, "day_type": {}, "price_position": {}}
+            session_data = {"london_ib": {}, "asian_range": {}, "bias": "neutral", "current_session": {}}
+            fundamental_data = {"bias": "neutral", "score": 50, "event_risk": {}, "news_sentiment": {}}
+            institutional_data = {"bias": "neutral", "inst_score": 0, "smart_money": {}, "accum_distrib": {}}
+            regime_data = {"current_regime": {}, "tradeable": {}, "optimal_strategy": {}}
+            symbol_macro = {"bias": "neutral", "risk_sentiment": {}}
+        else:
+            ict_data = ict_engine.analyze(df_15m, df_1h, df_4h)
+            amt_data = amt_engine.analyze(df_15m, df_1h, df_4h)
+            session_data = session_engine.analyze(df_15m)
+            fundamental_data = fundamental_engine.analyze(symbol, df_15m)
+            institutional_data = institutional_engine.analyze(df_15m, df_1h, df_4h)
+            regime_data = regime_engine.analyze(df_15m, df_1h)
+            symbol_macro = macro_engine.analyze(symbol, all_data)
+
+        corr_score = correlation_analyzer.get_correlation_score(
+            symbol, structure_data.get("bias", "neutral"), all_data
+        )
+
+        signal = signal_generator.generate_signal(
+            symbol, indicator_data, structure_data, corr_score,
+            quant_data, orderflow_data, mtf_data, pattern_data, all_data,
+            ict_data=ict_data, amt_data=amt_data,
+            session_data=session_data, fundamental_data=fundamental_data,
+            institutional_data=institutional_data, regime_data=regime_data,
+            macro_data=symbol_macro
+        )
+
+        if signal:
+            risk_eval = risk_engine.evaluate_trade(
+                signal, quant_data, orderflow_data, mtf_data, pattern_data
+            )
+            signal["win_probability"] = risk_eval.get("win_probability", 50)
+            signal["trade_quality"] = risk_eval.get("trade_quality", 50)
+            signal["risk_grade"] = risk_eval.get("risk_grade", "C")
+            signal["position_size_pct"] = risk_eval.get("position_size_pct", 1.0)
+            signal["kelly_fraction"] = risk_eval.get("kelly_fraction", 0)
+            signal["dynamic_rr"] = risk_eval.get("dynamic_rr", 2.0)
+            signal["should_trade"] = risk_eval.get("should_trade", False)
+            signal["warnings"] = risk_eval.get("warnings", [])
+            signal["session_score"] = risk_eval.get("session_score", 50)
+            signal["confluence_score"] = risk_eval.get("confluence_score", 0)
+
+            # ICT & AMT summary
+            signal["ict_bias"] = ict_data.get("bias", "neutral")
+            signal["ict_score"] = ict_data.get("ict_score", 0)
+            signal["kill_zone"] = ict_data.get("kill_zone", {}).get("session", "unknown")
+            signal["po3_phase"] = ict_data.get("power_of_3", {}).get("phase", "unknown")
+            signal["amt_bias"] = amt_data.get("bias", "neutral")
+            signal["amt_score"] = amt_data.get("amt_score", 0)
+            signal["day_type"] = amt_data.get("day_type", {}).get("type", "unknown")
+            signal["value_area"] = amt_data.get("price_position", {}).get("zone", "unknown")
+
+            # Session summary
+            signal["london_ib_status"] = session_data.get("london_ib", {}).get("status", "unknown")
+            signal["asian_breakout"] = session_data.get("asian_range", {}).get("breakout", "none")
+            signal["session_bias"] = session_data.get("bias", "neutral")
+            signal["current_session"] = session_data.get("current_session", {}).get("primary", "unknown")
+
+            # Fundamental summary
+            signal["fundamental_bias"] = fundamental_data.get("bias", "neutral")
+            signal["fundamental_score"] = fundamental_data.get("score", 50)
+            signal["event_risk"] = fundamental_data.get("event_risk", {}).get("risk_level", "low")
+            signal["news_sentiment"] = fundamental_data.get("news_sentiment", {}).get("news_bias", "neutral")
+
+            # Institutional summary
+            signal["inst_bias"] = institutional_data.get("bias", "neutral")
+            signal["inst_score"] = institutional_data.get("inst_score", 0)
+            signal["smart_money"] = institutional_data.get("smart_money", {}).get("signal", "neutral")
+            signal["inst_phase"] = institutional_data.get("accum_distrib", {}).get("phase", "neutral")
+
+            # Regime summary
+            signal["regime"] = regime_data.get("current_regime", {}).get("primary", "unknown")
+            signal["regime_quality"] = regime_data.get("current_regime", {}).get("quality", "fair")
+            signal["regime_tradeable"] = regime_data.get("tradeable", {}).get("tradeable", True)
+            signal["optimal_strategy"] = regime_data.get("optimal_strategy", {}).get("strategy", "unknown")
+
+            # Macro summary
+            signal["macro_bias"] = symbol_macro.get("bias", "neutral")
+            signal["risk_sentiment"] = symbol_macro.get("risk_sentiment", {}).get("sentiment", "neutral")
+
+            # Apply regime confidence multiplier
+            conf_mult = regime_data.get("tradeable", {}).get("confidence_multiplier", 1.0)
+            signal["confidence"] = min(98, signal.get("confidence", 50) * conf_mult)
+
+            # Apply event risk warning
+            if fundamental_data.get("event_risk", {}).get("should_reduce_size"):
+                signal["warnings"] = signal.get("warnings", []) + ["High-impact event pending - reduce size"]
+                signal["position_size_pct"] = signal.get("position_size_pct", 1.0) * 0.5
+
+            return signal, None
+
+        return None, None
+    except Exception as e:
+        return None, f"Analysis: {symbol}: {str(e)[:80]}"
+
+
 def _run_full_analysis():
     """Synchronous heavy analysis – called via asyncio.to_thread"""
     errors = []
     all_signals = []
 
     # ===== STEP 1: PARALLEL DATA FETCH (15m + 1H + 4H) =====
-    print("[AURA V2] Fetching market data (15m + 1H + 4H parallel)...")
-    all_data = {}  # 15m data
-    all_1h = {}    # 1h data
-    all_4h = {}    # 4h data
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        futures = {pool.submit(_fetch_one, sym): sym for sym in ACTIVE_INSTRUMENTS}
+    instruments = ACTIVE_INSTRUMENTS
+    print(f"[AURA V2] Fetching data for {len(instruments)} instruments (cloud={CLOUD_MODE})...")
+    all_data = {}
+    all_1h = {}
+    all_4h = {}
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        futures = {pool.submit(_fetch_one, sym): sym for sym in instruments}
         for future in as_completed(futures):
             sym, df_15m, df_1h, df_4h, err = future.result()
             if err:
@@ -184,130 +305,37 @@ def _run_full_analysis():
 
     print(f"[AURA V2] Loaded {len(all_data)} instruments (+ {len(all_1h)} 1H, {len(all_4h)} 4H)")
 
-    # ===== STEP 2: CORRELATION & INTER-MARKET =====
-    print("[AURA V2] Running enhanced correlation analysis...")
+    # ===== STEP 2: CORRELATION =====
+    print("[AURA V2] Running correlation analysis...")
     correlation_data = correlation_analyzer.analyze(all_data)
 
-    # ===== STEP 3: MACRO INTERMARKET (run once for all) =====
-    print("[AURA V2] Running macro intermarket analysis...")
-    macro_context = macro_engine.analyze("DX-Y.NYB", all_data)
+    # ===== STEP 3: MACRO (skip in cloud for speed) =====
+    if not CLOUD_MODE:
+        print("[AURA V2] Running macro intermarket analysis...")
+        macro_context = macro_engine.analyze("DX-Y.NYB", all_data)
 
-    # ===== STEP 4: ANALYZE EACH INSTRUMENT (15 engines + HTF) =====
-    print("[AURA V2] Running 15-engine institutional analysis...")
-    for symbol, df_15m in all_data.items():
-        try:
-            indicator_data = indicator_engine.calculate_all(df_15m)
-            if not indicator_data:
-                continue
-
-            structure_data = structure_analyzer.analyze(df_15m)
-            if not structure_data:
-                continue
-
+    # ===== STEP 4: PARALLEL INSTRUMENT ANALYSIS =====
+    print(f"[AURA V2] Analyzing {len(all_data)} instruments in parallel...")
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        analysis_futures = {}
+        for symbol, df_15m in all_data.items():
             df_1h = all_1h.get(symbol)
             df_4h = all_4h.get(symbol)
+            f = pool.submit(_analyze_one_instrument, symbol, df_15m, df_1h, df_4h, all_data, correlation_data)
+            analysis_futures[f] = symbol
 
-            quant_data = quant_engine.analyze(df_15m)
-            orderflow_data = orderflow_engine.analyze(df_15m)
-            mtf_data = mtf_engine.analyze(df_15m)
-            pattern_data = pattern_engine.analyze(df_15m)
-            ict_data = ict_engine.analyze(df_15m, df_1h, df_4h)
-            amt_data = amt_engine.analyze(df_15m, df_1h, df_4h)
-
-            # NEW: Session, Fundamental, Institutional, Regime
-            session_data = session_engine.analyze(df_15m)
-            fundamental_data = fundamental_engine.analyze(symbol, df_15m)
-            institutional_data = institutional_engine.analyze(df_15m, df_1h, df_4h)
-            regime_data = regime_engine.analyze(df_15m, df_1h)
-
-            # Per-symbol macro score
-            symbol_macro = macro_engine.analyze(symbol, all_data)
-
-            corr_score = correlation_analyzer.get_correlation_score(
-                symbol, structure_data.get("bias", "neutral"), all_data
-            )
-
-            signal = signal_generator.generate_signal(
-                symbol, indicator_data, structure_data, corr_score,
-                quant_data, orderflow_data, mtf_data, pattern_data, all_data,
-                ict_data=ict_data, amt_data=amt_data,
-                session_data=session_data, fundamental_data=fundamental_data,
-                institutional_data=institutional_data, regime_data=regime_data,
-                macro_data=symbol_macro
-            )
-
-            if signal:
-                risk_eval = risk_engine.evaluate_trade(
-                    signal, quant_data, orderflow_data, mtf_data, pattern_data
-                )
-                signal["win_probability"] = risk_eval.get("win_probability", 50)
-                signal["trade_quality"] = risk_eval.get("trade_quality", 50)
-                signal["risk_grade"] = risk_eval.get("risk_grade", "C")
-                signal["position_size_pct"] = risk_eval.get("position_size_pct", 1.0)
-                signal["kelly_fraction"] = risk_eval.get("kelly_fraction", 0)
-                signal["dynamic_rr"] = risk_eval.get("dynamic_rr", 2.0)
-                signal["should_trade"] = risk_eval.get("should_trade", False)
-                signal["warnings"] = risk_eval.get("warnings", [])
-                signal["session_score"] = risk_eval.get("session_score", 50)
-                signal["confluence_score"] = risk_eval.get("confluence_score", 0)
-
-                # ICT & AMT summary
-                signal["ict_bias"] = ict_data.get("bias", "neutral")
-                signal["ict_score"] = ict_data.get("ict_score", 0)
-                signal["kill_zone"] = ict_data.get("kill_zone", {}).get("session", "unknown")
-                signal["po3_phase"] = ict_data.get("power_of_3", {}).get("phase", "unknown")
-                signal["amt_bias"] = amt_data.get("bias", "neutral")
-                signal["amt_score"] = amt_data.get("amt_score", 0)
-                signal["day_type"] = amt_data.get("day_type", {}).get("type", "unknown")
-                signal["value_area"] = amt_data.get("price_position", {}).get("zone", "unknown")
-
-                # Session summary
-                signal["london_ib_status"] = session_data.get("london_ib", {}).get("status", "unknown")
-                signal["asian_breakout"] = session_data.get("asian_range", {}).get("breakout", "none")
-                signal["session_bias"] = session_data.get("bias", "neutral")
-                signal["current_session"] = session_data.get("current_session", {}).get("primary", "unknown")
-
-                # Fundamental summary
-                signal["fundamental_bias"] = fundamental_data.get("bias", "neutral")
-                signal["fundamental_score"] = fundamental_data.get("score", 50)
-                signal["event_risk"] = fundamental_data.get("event_risk", {}).get("risk_level", "low")
-                signal["news_sentiment"] = fundamental_data.get("news_sentiment", {}).get("news_bias", "neutral")
-
-                # Institutional summary
-                signal["inst_bias"] = institutional_data.get("bias", "neutral")
-                signal["inst_score"] = institutional_data.get("inst_score", 0)
-                signal["smart_money"] = institutional_data.get("smart_money", {}).get("signal", "neutral")
-                signal["inst_phase"] = institutional_data.get("accum_distrib", {}).get("phase", "neutral")
-
-                # Regime summary
-                signal["regime"] = regime_data.get("current_regime", {}).get("primary", "unknown")
-                signal["regime_quality"] = regime_data.get("current_regime", {}).get("quality", "fair")
-                signal["regime_tradeable"] = regime_data.get("tradeable", {}).get("tradeable", True)
-                signal["optimal_strategy"] = regime_data.get("optimal_strategy", {}).get("strategy", "unknown")
-
-                # Macro summary
-                signal["macro_bias"] = symbol_macro.get("bias", "neutral")
-                signal["risk_sentiment"] = symbol_macro.get("risk_sentiment", {}).get("sentiment", "neutral")
-
-                # Apply regime confidence multiplier
-                conf_mult = regime_data.get("tradeable", {}).get("confidence_multiplier", 1.0)
-                signal["confidence"] = min(98, signal.get("confidence", 50) * conf_mult)
-
-                # Apply event risk warning
-                if fundamental_data.get("event_risk", {}).get("should_reduce_size"):
-                    signal["warnings"] = signal.get("warnings", []) + ["High-impact event pending - reduce size"]
-                    signal["position_size_pct"] = signal.get("position_size_pct", 1.0) * 0.5
-
+        for future in as_completed(analysis_futures):
+            signal, err = future.result()
+            if err:
+                errors.append(err)
+            elif signal:
                 all_signals.append(signal)
 
-        except Exception as e:
-            errors.append(f"Analysis: {symbol}: {str(e)[:80]}")
-
-    # ===== STEP 4: RANK =====
+    # ===== STEP 5: RANK =====
     print(f"[AURA V2] Ranking {len(all_signals)} signals...")
     ranked_signals = trade_ranker.rank_signals(all_signals)
 
-    # ===== STEP 5: BUILD OVERVIEW =====
+    # ===== STEP 6: BUILD OVERVIEW =====
     market_overview = _build_market_overview(all_data, correlation_data)
 
     print(f"[AURA V2] Analysis complete: {len(ranked_signals)} trade ideas ranked")
